@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mapbox Weather Layers</title>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet" />
+<style>
+  html, body { height: 100%; margin: 0; }
+  #map { position: absolute; inset: 0; }
+  .ui { position: absolute; z-index: 2; top: 12px; left: 12px; bottom: 12px; width: 240px; display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,.55); color: #fff; padding: 10px; border-radius: 10px; font-family: system-ui, sans-serif; overflow: auto; }
+  .ui button, .ui input[type="range"] { accent-color: #37f; width: 100%; }
+  .ui button { cursor: pointer; border: 0; padding: 8px 10px; border-radius: 8px; font-size: 12px; text-align: left; }
+  .ui .time { min-width: auto; font-variant-numeric: tabular-nums; }
+  .legend { position: absolute; right: 12px; top: 12px; z-index: 2; background: rgba(255,255,255,0.9); padding: 6px; border-radius: 6px; font-size: 12px; }
+  .user-dot { width:16px; height:16px; border-radius:50%; background:#1cc94a; border:2px solid #fff; box-shadow:0 0 0 2px rgba(28,201,74,.4); }
+  .user-dot.pulse { animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%{ box-shadow:0 0 0 2px rgba(28,201,74,.5);} 70%{ box-shadow:0 0 0 10px rgba(28,201,74,0);} 100%{ box-shadow:0 0 0 2px rgba(28,201,74,0);} }
+</style>
+</head>
+<body>
+<script>const MAPBOX_TOKEN = "pk.eyJ1IjoiYm9sdHd4c29sdXRpb25zIiwiYSI6ImNtZTRzaWgwejBrdHUybHB1NGliNDdwdWYifQ.fvrTuYTT-uD49UVVzpX4aw";</script>
+<div id="map"></div>
+<div class="ui">
+  <button id="play">▶︎</button>
+  <input id="slider" type="range" min="0" max="0" step="1" value="0" />
+  <span id="tlabel" class="time">—</span>
+  <label>Opacity <input id="opacity" type="range" min="0" max="1" step="0.05" value="0.8" /></label>
+  <button id="toggle-radar">Hide Radar</button>
+  <button id="toggle-alerts">Hide Alerts</button>
+  <button id="btn-lightning">Lightning</button>
+  <button id="btn-tracks">Storm Tracks</button>
+  <button id="btn-reports">Storm Reports</button>
+  <button id="btn-watches">Watches</button>
+  <button id="btn-spc">SPC Outlooks</button>
+  <button id="btn-wpc">WPC QPF</button>
+  <button id="btn-cpc">CPC 6–10d</button>
+  <button id="btn-ptwx">Precip Type (Forecast)</button>
+  <button id="btn-nationwide">Nationwide Alerts: Off</button>
+  <button id="btn-mark">Mark Location</button>
+  <button id="btn-gps">Use My Location</button>
+</div>
+<div class="legend" id="radar-legend">
+  <strong>Radar & Overlays Legend</strong>
+  <img alt="Radar legend" src="https://nowcoast.noaa.gov/geoserver/observations/weather_radar/wms?service=WMS&request=GetLegendGraphic&format=image/png&layer=conus_base_reflectivity_mosaic"/>
+</div>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+<script>
+// ===== Map init =====
+mapboxgl.accessToken = MAPBOX_TOKEN;
+const map = new mapboxgl.Map({ container: 'map', style: 'mapbox://styles/mapbox/dark-v11', center: [-86.1581, 39.7684], zoom: 6 });
+
+// ===== Helpers =====
+function wmsUrl(base, layer, extraParams={}){ const p=new URLSearchParams({ service:'WMS', request:'GetMap', version:'1.3.0', layers:layer, format:'image/png', transparent:'true', crs:'EPSG:3857', width:256, height:256, ...extraParams }); return `${base}?${p.toString()}&bbox={bbox-epsg-3857}`; }
+function addRaster(id, url, opacity=0.8){ if(map.getSource(id)) return; map.addSource(id,{ type:'raster', tiles:[url], tileSize:256 }); map.addLayer({ id, type:'raster', source:id, paint:{ 'raster-opacity':opacity } }); }
+function toggleLayer(id, visible){ if(map.getLayer(id)) map.setLayoutProperty(id,'visibility', visible?'visible':'none'); }
+async function identifyArcGIS(base, layerIds, lngLat){ const geometry=JSON.stringify({ x:lngLat.lng, y:lngLat.lat, spatialReference:{wkid:4326} }); const q=new URLSearchParams({ f:'json', geometry, geometryType:'esriGeometryPoint', sr:'4326', tolerance:3, mapExtent:`${map.getBounds().getWest()},${map.getBounds().getSouth()},${map.getBounds().getEast()},${map.getBounds().getNorth()}`, imageDisplay:'800,600,96', layers:`all:${layerIds}`, returnGeometry:'false' }); return (await fetch(`${base}/identify?${q.toString()}`)).json(); }
+function showPopup(lngLat, html){ new mapboxgl.Popup().setLngLat(lngLat).setHTML(html).addTo(map); }
+
+// Field mappers
+function getSPCRisk(a){ return a.LABEL || a.RISK || a.RISK_CAT || a.CAT || a.CATEGORY || a.DN || a.GEN || a.Risk || 'Unknown'; }
+function getWPCAmount(a){ return a.AMOUNT || a.QPF || a.LABEL || a.Label || a.Contour || a.VALUE || '—'; }
+function getCPCPieces(results){ const out=[]; results.forEach(r=>{ const a=r.attributes||{}; const t=a.LABEL||a.Text||a.Category||a.CAT||a.VALUE; if(t) out.push(t); }); return out; }
+
+// Math + unit helpers
+function cToF(c){ return c==null?null:(c*9/5+32); }
+function mpsToMph(m){ return m==null?null:(m*2.236936); }
+function paToInHg(pa){ return pa==null?null: Math.round((pa/3386.389)*100)/100; }
+function mToMi(m){ return m==null?null: Math.round((m/1609.344)*10)/10; }
+function degToDir(d){ if(d==null||!isFinite(d)) return '—'; const dirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW']; return dirs[Math.round((((d%360)+360)%360)/22.5)%16]; }
+function heatIndexF(T,RH){ if(T==null||RH==null||T<80||RH<40) return null; const c1=-42.379,c2=2.04901523,c3=10.14333127,c4=-0.22475541,c5=-6.83783e-3,c6=-5.481717e-2,c7=1.22874e-3,c8=8.5282e-4,c9=-1.99e-6; return Math.round(c1+c2*T+c3*RH+c4*T*RH+c5*T*T+c6*RH*RH+c7*T*T*RH+c8*T*RH*RH+c9*T*T*RH*RH); }
+function windChillF(T,V){ if(T==null||V==null||T>50||V<3) return null; return Math.round(35.74+0.6215*T-35.75*Math.pow(V,0.16)+0.4275*T*Math.pow(V,0.16)); }
+
+// ===== Radar (MRMS via nowCOAST WMS TIME) =====
+function buildRadarFrames(){ const frames=[]; const now=new Date(); now.setUTCMinutes(Math.floor(now.getUTCMinutes()/10)*10,0,0); for(let m=70;m>=0;m-=10){ const t=new Date(now.getTime()-m*60000); frames.push({ ts:t.toISOString(), url:wmsUrl('https://nowcoast.noaa.gov/geoserver/observations/weather_radar/wms','conus_base_reflectivity_mosaic',{ time:t.toISOString() }) }); } return frames; }
+const RADAR_FRAMES = buildRadarFrames();
+const radarLayerIds=[]; let currentRadarIdx=0;
+
+map.on('load',()=>{
+  RADAR_FRAMES.forEach((f,i)=>{ const id=`radar-${i}`; addRaster(id,f.url, i===RADAR_FRAMES.length-1 ? 0.8 : 0); radarLayerIds.push(id); });
+  document.getElementById('slider').max = RADAR_FRAMES.length-1;
+  currentRadarIdx = RADAR_FRAMES.length-1;
+  setActiveFrame(RADAR_FRAMES.length-1);
+
+  // Alerts
+  map.addSource('nws-alerts',{ type:'geojson', data:{ type:'FeatureCollection', features:[] } });
+  map.addLayer({ id:'alerts-fill', type:'fill', source:'nws-alerts', paint:{ 'fill-color':[ 'match',['get','severity'], 'Extreme','#d73027','Severe','#fc8d59','Moderate','#fee08b','Minor','#91cf60','#4575b4' ], 'fill-opacity':0.28 } });
+  map.addLayer({ id:'alerts-outline', type:'line', source:'nws-alerts', paint:{ 'line-color':'#fff','line-width':1 } });
+  map.addLayer({ id:'alerts-label', type:'symbol', source:'nws-alerts', layout:{ 'text-field':['coalesce',['get','event'],['get','headline'],'NWS Alert'], 'text-size':12, 'text-variable-anchor':['top','bottom','left','right'], 'text-radial-offset':0.6 }, paint:{ 'text-color':'#fff','text-halo-color':'#000','text-halo-width':1.2 } });
+  map.on('click','alerts-fill',(e)=>{ const f=e.features&&e.features[0]; if(!f) return; const p=f.properties||{}; const html=`<strong>${p.event||'NWS Alert'}</strong>${p.headline?`<div>${p.headline}</div>`:''}${p.description?`<div style="max-width:280px;margin-top:6px;">${p.description}</div>`:''}${p.instruction?`<div style="margin-top:6px;"><em>${p.instruction}</em></div>`:''}${p.severity?`<div style="margin-top:6px;">Severity: ${p.severity}</div>`:''}`; showPopup(e.lngLat, html); });
+
+  // SBW + Tracks
+  map.addSource('sbw',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({id:'sbw-fill',type:'fill',source:'sbw',paint:{'fill-color':'#f6a821','fill-opacity':0.12},layout:{'visibility':'none'}});
+  map.addLayer({id:'sbw-line',type:'line',source:'sbw',paint:{'line-color':'#f6a821','line-width':1},layout:{'visibility':'none'}});
+  map.addSource('sbw-tracks',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({id:'sbw-tracks-line',type:'line',source:'sbw-tracks',paint:{'line-color':'#00d4ff','line-width':2}});
+
+  // LSR
+  map.addSource('lsr',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({id:'lsr-dot',type:'circle',source:'lsr',paint:{'circle-radius':4,'circle-color':'#ff4d4f','circle-stroke-color':'#fff','circle-stroke-width':1}});
+  map.addLayer({id:'lsr-label',type:'symbol',source:'lsr',layout:{'text-field':['get','typetext'],'text-size':10,'text-offset':[0,1.2]},paint:{'text-halo-color':'#000','text-halo-width':1,'text-color':'#fff'}});
+
+  refreshAlerts();
+
+  // Watches (SPC/NWS via IEM)
+  map.addSource('watches',{ type:'geojson', data:{ type:'FeatureCollection', features:[] } });
+  map.addLayer({ id:'watches-fill', type:'fill', source:'watches', paint:{ 'fill-color':[ 'match', ['get','phenomena'], 'TO', '#ff3b30', 'SV', '#ff9500', 'FF', '#2dd36f', 'WS', '#5ac8fa', /*default*/ '#b28dff' ], 'fill-opacity':0.18 } });
+  map.addLayer({ id:'watches-line', type:'line', source:'watches', paint:{ 'line-color':[ 'match', ['get','phenomena'], 'TO', '#ff3b30', 'SV', '#ff9500', 'FF', '#2dd36f', 'WS', '#5ac8fa', '#b28dff' ], 'line-width':2, 'line-dasharray':[2,2] } });
+  map.addLayer({ id:'watches-label', type:'symbol', source:'watches', layout:{ 'text-field':['coalesce',['get','event'],['get','watch_type'],['get','phenomena'],'Watch'], 'text-size':12, 'text-variable-anchor':['top','bottom','left','right'], 'text-radial-offset':0.6 }, paint:{ 'text-color':'#fff','text-halo-color':'#000','text-halo-width':1.2 } });
+});
+
+function setActiveFrame(i){ i=Math.max(0,Math.min(RADAR_FRAMES.length-1,i)); radarLayerIds.forEach((id,idx)=>map.setPaintProperty(id,'raster-opacity', idx===i ? parseFloat(document.getElementById('opacity').value) : 0)); currentRadarIdx=i; document.getElementById('slider').value=String(i); document.getElementById('tlabel').textContent=new Date(RADAR_FRAMES[i].ts).toUTCString(); }
+(function(){ const slider=document.getElementById('slider'); const playBtn=document.getElementById('play'); const opacityCtl=document.getElementById('opacity'); let playing=false, timer=null; slider.oninput=()=>setActiveFrame(parseInt(slider.value,10)); opacityCtl.oninput=()=>setActiveFrame(currentRadarIdx); function tick(){ setActiveFrame((currentRadarIdx+1)%RADAR_FRAMES.length); } function setPlaying(on){ playing=on; playBtn.textContent=on?'⏸':'▶︎'; clearInterval(timer); if(on) timer=setInterval(tick,800); } playBtn.onclick=()=>setPlaying(!playing); document.getElementById('toggle-radar').onclick=()=>{ const visible=(map.getLayoutProperty(radarLayerIds[0],'visibility')||'visible')!=='none'; radarLayerIds.forEach(id=>toggleLayer(id,!visible)); }; })();
+
+// ===== Overlays toggles =====
+document.getElementById('btn-lightning').onclick=()=>{ const now=Date.now(), dt=15*60*1000; const timeParam=`&time=${now-dt},${now}`; const id='glm-lightning'; if(!map.getSource(id)){ const tiles=[`https://nowcoast.noaa.gov/arcgis/rest/services/nowcoast/sat_meteo_emulated_imagery_lightningstrikedensity_goes_time/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&format=png32&transparent=true&f=image&layers=show:0&size=256,256${timeParam}`]; map.addSource(id,{type:'raster',tiles,tileSize:256}); map.addLayer({id,type:'raster',source:id,paint:{'raster-opacity':0.8}}); } else { const vis=map.getLayoutProperty(id,'visibility')||'visible'; toggleLayer(id, vis==='none'); } };
+
+document.getElementById('btn-spc').onclick=()=>{ const id='spc-day1'; if(!map.getSource(id)){ const tiles=[`https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&format=png32&transparent=true&f=image&layers=show:1&size=256,256`]; map.addSource(id,{type:'raster',tiles,tileSize:256}); map.addLayer({id,type:'raster',source:id,paint:{'raster-opacity':0.6}}); } else { const vis=map.getLayoutProperty(id,'visibility')||'visible'; toggleLayer(id, vis==='none'); } };
+
+document.getElementById('btn-wpc').onclick=()=>{ const id='wpc-qpf'; if(!map.getSource(id)){ const tiles=[`https://mapservices.weather.noaa.gov/vector/rest/services/precip/wpc_qpf/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&format=png32&transparent=true&f=image&layers=show:22&size=256,256`]; map.addSource(id,{type:'raster',tiles,tileSize:256}); map.addLayer({id,type:'raster',source:id,paint:{'raster-opacity':0.5}}); } else { const vis=map.getLayoutProperty(id,'visibility')||'visible'; toggleLayer(id, vis==='none'); } };
+
+document.getElementById('btn-cpc').onclick=()=>{ const id='cpc-610'; if(!map.getSource(id)){ const tiles=[`https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/cpc_6_10_day_outlk/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&format=png32&transparent=true&f=image&layers=show:0,1&size=256,256`]; map.addSource(id,{type:'raster',tiles,tileSize:256}); map.addLayer({id,type:'raster',source:id,paint:{'raster-opacity':0.6}}); } else { const vis=map.getLayoutProperty(id,'visibility')||'visible'; toggleLayer(id, vis==='none'); } };
+
+// NDFD precip-type forecast
+function buildNDFDWmsUrl(layer){ const base=`https://digital.weather.gov/${layer.startsWith('ndfd.conus')?'ndfd.conus':'ndfd'}/wms`; const vt=new Date(); vt.setMinutes(0,0,0); const vtit=vt.toISOString().slice(0,16); return wmsUrl(base, layer, { STYLES:'', TRANSPARENT:'true', FORMAT:'image/png', VERSION:'1.3.0', CRS:'EPSG:3857', VTIT: vtit }); }
+document.getElementById('btn-ptwx').onclick=()=>{ const id='ndfd-ptwx'; if(!map.getSource(id)){ const url=buildNDFDWmsUrl('ndfd.conus.wx'); map.addSource(id,{type:'raster',tiles:[url],tileSize:256}); map.addLayer({id,type:'raster',source:id,paint:{'raster-opacity':0.75}}); } else { const vis=map.getLayoutProperty(id,'visibility')||'visible'; toggleLayer(id, vis==='none'); } };
+
+// ===== Alerts fetch (bbox or nationwide) =====
+let nationwideAlerts=false; const btnNationwide=document.getElementById('btn-nationwide');
+btnNationwide.onclick=()=>{ nationwideAlerts=!nationwideAlerts; btnNationwide.textContent=`Nationwide Alerts: ${nationwideAlerts?'On':'Off'}`; refreshAlerts(true); };
+async function refreshAlerts(){ try{ const b=map.getBounds(); const url = nationwideAlerts ? `https://api.weather.gov/alerts/active?status=actual&message_type=alert` : `https://api.weather.gov/alerts/active?status=actual&message_type=alert&bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`; const res=await fetch(url,{ headers:{ 'Accept':'application/geo+json' } }); const gj=await res.json(); const fc=(gj&&gj.features&&gj.features.length)?gj:{ type:'FeatureCollection', features:[] }; map.getSource('nws-alerts').setData(fc); checkUserLocationAlerts(); } catch(e){ console.error('NWS alerts fetch failed',e); } }
+map.on('moveend',()=>setTimeout(refreshAlerts,800));
+const alertsBtn=document.getElementById('toggle-alerts'); let alertsVisible=true; function setAlertsVisible(v){ alertsVisible=v; ['alerts-fill','alerts-outline','alerts-label'].forEach(id=>toggleLayer(id,v)); alertsBtn.textContent=v?'Hide Alerts':'Show Alerts'; } alertsBtn.onclick=()=>setAlertsVisible(!alertsVisible); setAlertsVisible(true);
+
+// ===== SBW tracks =====
+function extractNumber(val){ let s=String(val||''); let out=''; for(let i=0;i<s.length;i++){ const c=s[i]; if((c>='0'&&c<='9')||c=='.') out+=c; } const n=parseFloat(out); return isFinite(n)?n:NaN; }
+function parseBearingDeg(props){ const c=[props.drct,props.motion_deg,props.mvdeg,props.heading,props.dir,props.direction,props.motdir,props.mot_dir,props.motion,props.MOTION]; for(const v of c){ if(v==null) continue; if(typeof v==='number'&&isFinite(v)) return (v%360+360)%360; const n=extractNumber(v); if(isFinite(n)) return (n%360+360)%360; } return NaN; }
+function parseSpeedMPH(props){ if(props.sknt!=null && isFinite(props.sknt)) return props.sknt*1.15078; const c=[props.motion_mph,props.mph,props.speed,props.SPEED]; for(const v of c){ const n=Number(v); if(isFinite(n)) return n; } return 35; }
+function pcaBearingFromRing(ring){ let mx=0,my=0; for(const pt of ring){ mx+=pt[0]; my+=pt[1]; } mx/=ring.length; my/=ring.length; let sxx=0,syy=0,sxy=0; for(const pt of ring){ const dx=pt[0]-mx, dy=pt[1]-my; sxx+=dx*dx; syy+=dy*dy; sxy+=dx*dy; } const theta=0.5*Math.atan2(2*sxy,(sxx-syy)); const az=90-(theta*180/Math.PI); return (az%360+360)%360; }
+function centroid(coords){ const ring=coords&&coords[0]; if(!ring||!ring.length) return null; let x=0,y=0,z=0; ring.forEach(([lon,lat])=>{ const λ=lon*Math.PI/180, φ=lat*Math.PI/180; x+=Math.cos(φ)*Math.cos(λ); y+=Math.cos(φ)*Math.sin(λ); z+=Math.sin(φ); }); const L=ring.length; x/=L; y/=L; z/=L; const λ=Math.atan2(y,x), φ=Math.atan2(z,Math.sqrt(x*x+y*y)); return [((λ*180/Math.PI+540)%360)-180, φ*180/Math.PI]; }
+function destPoint(lon,lat,brgDeg,distKm){ const R=6371, brg=brgDeg*Math.PI/180, dR=distKm/R; const φ1=lat*Math.PI/180, λ1=lon*Math.PI/180; const φ2=Math.asin(Math.sin(φ1)*Math.cos(dR)+Math.cos(φ1)*Math.sin(dR)*Math.cos(brg)); const λ2=λ1+Math.atan2(Math.sin(brg)*Math.sin(dR)*Math.cos(φ1), Math.cos(dR)-Math.sin(φ1)*Math.sin(φ2)); return [((λ2*180/Math.PI+540)%360)-180, φ2*180/Math.PI]; }
+async function refreshSBW(){ try{ const gj=await (await fetch('https://mesonet.agron.iastate.edu/geojson/sbw.geojson?_='+Date.now())).json(); const tracks={ type:'FeatureCollection', features:[] }; gj.features.forEach(f=>{ const p=f.properties||{}, g=f.geometry||{}; if(g.type==='Polygon'||g.type==='MultiPolygon'){ const ring=(g.type==='Polygon')? g.coordinates[0] : (g.coordinates[0]&&g.coordinates[0][0]); if(!ring) return; const c=centroid([ring]); if(!c) return; let brg=parseBearingDeg(p); if(!isFinite(brg)) brg=pcaBearingFromRing(ring); const txt=String(p.motion||p.MOTION||'').toLowerCase(); if(txt.indexOf('from')>-1 && txt.indexOf('toward')===-1) brg=(brg+180)%360; const mph=parseSpeedMPH(p); const distKm=mph*1.60934; const end=destPoint(c[0],c[1],brg,distKm); tracks.features.push({ type:'Feature', geometry:{ type:'LineString', coordinates:[c,end] }, properties:{...p,_bearing:brg,_mph:mph} }); } }); map.getSource('sbw').setData(gj); map.getSource('sbw-tracks').setData(tracks); }catch(e){ console.error('SBW fail',e); } }
+document.getElementById('btn-tracks').onclick=()=>{ const vis=map.getLayoutProperty('sbw-tracks-line','visibility')||'none'; toggleLayer('sbw-tracks-line', vis==='none'); if(vis==='none') refreshSBW(); };
+
+// ===== LSR reports =====
+async function refreshLSR(){ const b=map.getBounds(); const url=`https://mesonet.agron.iastate.edu/geojson/lsr.geojson?hours=12&west=${b.getWest()}&east=${b.getEast()}&south=${b.getSouth()}&north=${b.getNorth()}`; try{ const gj=await (await fetch(url)).json(); map.getSource('lsr').setData(gj);}catch(e){ console.error('LSR fail',e);} }
+document.getElementById('btn-reports').onclick=()=>{ const vis=map.getLayoutProperty('lsr-dot','visibility')||'visible'; ['lsr-dot','lsr-label'].forEach(id=>toggleLayer(id,vis==='none')); if(vis==='none') refreshLSR(); };
+map.on('moveend',()=>{ if((map.getLayoutProperty('lsr-dot','visibility')||'none')!=='none') refreshLSR(); });
+
+// Watches toggle + fetch
+async function refreshWatches(){ try{ const gj=await (await fetch('https://mesonet.agron.iastate.edu/geojson/watch.geojson?_='+Date.now())).json(); map.getSource('watches').setData(gj); checkUserLocationAlerts(); }catch(e){ console.error('Watches fetch failed', e);} }
+document.getElementById('btn-watches').onclick=()=>{ const vis=(map.getLayoutProperty('watches-fill','visibility')||'visible')!=='none'; ['watches-fill','watches-line','watches-label'].forEach(id=>toggleLayer(id,!vis)); if(!vis) refreshWatches(); };
+
+// ===== Identify clicks for SPC/WPC/CPC =====
+map.on('click',(e)=>{
+  if((map.getLayoutProperty('spc-day1','visibility')||'none')!=='none'){
+    identifyArcGIS('https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer','1',e.lngLat).then(res=>{ const r=(res.results&&res.results[0])||null; if(!r) return; const a=r.attributes||{}; const risk=getSPCRisk(a); showPopup(e.lngLat, `<strong>SPC Outlook</strong><div>Risk: ${risk}</div>`); });
+  }
+  if((map.getLayoutProperty('wpc-qpf','visibility')||'none')!=='none'){
+    identifyArcGIS('https://mapservices.weather.noaa.gov/vector/rest/services/precip/wpc_qpf/MapServer','22',e.lngLat).then(res=>{ const r=(res.results&&res.results[0])||null; if(!r) return; const a=r.attributes||{}; const amt=getWPCAmount(a); showPopup(e.lngLat, `<strong>WPC QPF (Day 1)</strong><div>Amount: ${amt}</div>`); });
+  }
+  if((map.getLayoutProperty('cpc-610','visibility')||'none')!=='none'){
+    identifyArcGIS('https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/cpc_6_10_day_outlk/MapServer','0,1',e.lngLat).then(res=>{ if(!res.results||!res.results.length) return; const parts=getCPCPieces(res.results); if(!parts.length) return; showPopup(e.lngLat, `<strong>CPC 6–10 Day</strong><div>${parts.join('<br/>')}</div>`); });
+  }
+});
+
+// ===== User location marker + current conditions popup =====
+function createUserEl(){ const el=document.createElement('div'); el.className='user-dot pulse'; return el; }
+let userMarker=null; function setUserMarker(lngLat){ if(!userMarker){ userMarker=new mapboxgl.Marker({ element:createUserEl(), draggable:true }).setLngLat(lngLat).addTo(map); userMarker.on('dragend',showUserWeather); userMarker.getElement().addEventListener('click',showUserWeather); } else { userMarker.setLngLat(lngLat); } }
+async function getJSON(url, headers={}){ const r=await fetch(url,{ headers }); if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); }
+async function showUserWeather(){ try{ if(!userMarker) return; const ll=userMarker.getLngLat(); const lat=ll.lat.toFixed(4), lon=ll.lng.toFixed(4); const pt=await getJSON(`https://api.weather.gov/points/${lat},${lon}`,{ 'Accept':'application/geo+json' }); const stationUrl=(pt.properties&&pt.properties.observationStations)||''; const grid=(pt.properties&&pt.properties.gridId!=null&&pt.properties.gridX!=null)?{id:pt.properties.gridId,x:pt.properties.gridX,y:pt.properties.gridY}:null; let latest=null; if(stationUrl){ const stations=await getJSON(stationUrl); const st=(stations.features&&stations.features[0]&&stations.features[0].properties.stationIdentifier)||null; if(st){ latest=await getJSON(`https://api.weather.gov/stations/${st}/observations/latest`,{'Accept':'application/geo+json'}); } } const alerts=await getJSON(`https://api.weather.gov/alerts/active?point=${lat},${lon}`,{'Accept':'application/geo+json'}); const p=latest&&latest.properties; const tF=p&&p.temperature&&p.temperature.value!=null? Math.round(cToF(p.temperature.value)) : null; const rh=p&&p.relativeHumidity&&p.relativeHumidity.value!=null? Math.round(p.relativeHumidity.value) : null; const wMps=p&&p.windSpeed&&p.windSpeed.value!=null? p.windSpeed.value : null; const wMph=wMps!=null? Math.round(mpsToMph(wMps)) : null; const gust=p&&p.windGust&&p.windGust.value!=null? Math.round(mpsToMph(p.windGust.value)) : null; const wdir=p&&p.windDirection&&p.windDirection.value!=null? Math.round(p.windDirection.value) : null; const dpF=p&&p.dewpoint&&p.dewpoint.value!=null? Math.round(cToF(p.dewpoint.value)) : null; const visMi=p&&p.visibility&&p.visibility.value!=null? mToMi(p.visibility.value) : null; const press=p&&p.barometricPressure&&p.barometricPressure.value!=null? paToInHg(p.barometricPressure.value) : null; const wx=p&&p.textDescription || '—'; const hi=heatIndexF(tF,rh); const wc=windChillF(tF,wMph); const feels=hi!=null? `${hi}°F (Heat Index)` : (wc!=null? `${wc}°F (Wind Chill)` : (tF!=null? `${tF}°F` : '—')); const windLine=`${wMph!=null? wMph+' mph' : '—'}${wdir!=null? ' '+degToDir(wdir)+' ('+wdir+'°)':''}${gust!=null? ' (gust '+gust+' mph)':''}`; const alertList=(alerts.features||[]).slice(0,5).map(a=>`<div>• <strong>${a.properties.event}</strong>${a.properties.ends?` (until ${new Date(a.properties.ends).toLocaleString()})`:''}</div>`).join('')||'<div>No active alerts here.</div>'; const html=`<div style="min-width:240px"><div><strong>Current conditions</strong></div><div>${wx}</div><div>Temp: ${tF!=null? tF+'°F' : '—'} | Feels: ${feels}</div><div>Dewpoint: ${dpF!=null? dpF+'°F' : '—'}${rh!=null? ' • RH: '+rh+'%':''}</div><div>Wind: ${windLine}</div><div>Visibility: ${visMi!=null? visMi+' mi':'—'}${press!=null? ' • Pressure: '+press+' inHg':''}</div>${grid?`<div>Grid: ${grid.id} ${grid.x},${grid.y}</div>`:''}<hr style="border:none;border-top:1px solid #ccc;margin:8px 0"/><div><strong>Alerts</strong></div>${alertList}</div>`; new mapboxgl.Popup().setLngLat([ll.lng,ll.lat]).setHTML(html).addTo(map); }catch(e){ console.error('user weather failed',e);} }
+document.getElementById('btn-gps').onclick=()=>{ if(!navigator.geolocation) return; navigator.geolocation.getCurrentPosition(pos=>{ setUserMarker({lng:pos.coords.longitude,lat:pos.coords.latitude}); showUserWeather(); }, console.warn, { enableHighAccuracy:true, timeout:8000 }); };
+document.getElementById('btn-mark').onclick=()=>{ map.once('click',e=>{ setUserMarker(e.lngLat); showUserWeather(); }); };
+
+// ===== Nationwide alerts + user-location alert check =====
+let lastAlertIds=new Set();
+function pointInPolygon(lon,lat,geom){ function inRing(r){ let inside=false; for(let i=0,j=r.length-1;i<r.length;j=i++){ const xi=r[i][0], yi=r[i][1], xj=r[j][0], yj=r[j][1]; const intersect=((yi>lat)!==(yj>lat)) && (lon < (xj-xi)*(lat-yi)/(((yj-yi)||1e-12))+xi); if(intersect) inside=!inside; } return inside; } if(geom.type==='Polygon') return inRing(geom.coordinates[0]); if(geom.type==='MultiPolygon'){ for(const poly of geom.coordinates){ if(inRing(poly[0])) return true; } } return false; }
+function checkUserLocationAlerts(){
+  if(!userMarker) return;
+  const src=map.getSource('nws-alerts'); if(!src||!src._data) return;
+  const data=src._data; const {lng,lat}=userMarker.getLngLat();
+  const hits=[];
+  for(const f of (data.features||[])){
+    if(!f||!f.geometry) continue;
+    if(pointInPolygon(lng,lat,f.geometry)){
+      const id=f.id || (f.properties && (f.properties.id || (f.properties.event + (f.properties.effective||''))));
+      hits.push({ id, props:f.properties||{} });
+    }
+  }
+  const el=userMarker.getElement();
+  el.style.filter = hits.length>0 ? 'drop-shadow(0 0 6px #ff3333)' : 'none';
+  el.style.background = hits.length>0 ? '#ff3b30' : '#1cc94a';
+  const newOnes=hits.filter(h=>!lastAlertIds.has(h.id));
+  lastAlertIds=new Set(hits.map(h=>h.id));
+  if(newOnes.length){
+    const lines=newOnes.map(h=>{ const p=h.props; const title=p.event||'NWS Alert'; const until=p.expires?` (until ${new Date(p.expires).toLocaleString()})`:''; return `<div>• <strong>${title}</strong>${until}</div>`; }).join('');
+    new mapboxgl.Popup().setLngLat([lng,lat]).setHTML(`<div style=\"max-width:260px\"><strong>Your Location</strong>${lines}</div>`).addTo(map);
+  }
+}=userMarker.getLngLat();
+  const hits=[];
+  for(const f of (data.features||[])){
+    if(!f||!f.geometry) continue;
+    if(pointInPolygon(lng,lat,f.geometry)){
+      const id=f.id || (f.properties && (f.properties.id || (f.properties.event + (f.properties.effective||''))));
+      hits.push({ id, props:f.properties||{} });
+    }
+  }
+  const el=userMarker.getElement();
+  el.style.filter = hits.length>0 ? 'drop-shadow(0 0 6px #ff3333)' : 'none';
+  el.style.background = hits.length>0 ? '#ff3b30' : '#1cc94a';
+  const newOnes=hits.filter(h=>!lastAlertIds.has(h.id));
+  lastAlertIds=new Set(hits.map(h=>h.id));
+  if(newOnes.length){
+    const lines=newOnes.map(h=>{ const p=h.props; const title=p.event||'NWS Alert'; const until=p.expires?` (until ${new Date(p.expires).toLocaleString()})`:''; return `<div>• <strong>${title}</strong>${until}</div>`; }).join('');
+    new mapboxgl.Popup().setLngLat([lng,lat]).setHTML(`<div style=\"max-width:260px\"><strong>Your Location</strong>${lines}</div>`).addTo(map);
+  }
+}=userMarker.getLngLat(); const hits=[]; for(const f of (data.features||[])){ if(!f||!f.geometry) continue; if(pointInPolygon(lng,lat,f.geometry)){ const id=f.id || (f.properties && (f.properties.id || (f.properties.event + (f.properties.effective||'')))); hits.push({ id, props:f.properties||{} }); } } const newOnes=hits.filter(h=>!lastAlertIds.has(h.id)); lastAlertIds=new Set(hits.map(h=>h.id)); if(newOnes.length){ const lines=newOnes.map(h=>{ const p=h.props; const title=p.event||'NWS Alert'; const until=p.expires?` (until ${new Date(p.expires).toLocaleString()})`:''; return `<div>• <strong>${title}</strong>${until}</div>`; }).join(''); new mapboxgl.Popup().setLngLat([lng,lat]).setHTML(`<div style="max-width:260px"><strong>Your Location</strong>${lines}</div>`).addTo(map); } }
+
+</script>
+</body>
+</html>
