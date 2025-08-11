@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Advanced Weather Radar</title>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet" />
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  
+  .ui { 
+    position: absolute; z-index: 2; top: 12px; left: 12px; bottom: 12px; 
+    width: 260px; max-height: calc(100vh - 24px);
+    display: flex; flex-direction: column; gap: 6px; 
+    background: rgba(0,0,0,.7); color: #fff; padding: 12px; 
+    border-radius: 12px; overflow-y: auto; backdrop-filter: blur(8px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+  
+  .ui-section {
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding-bottom: 8px;
+    margin-bottom: 8px;
+  }
+  
+  .ui-section:last-child { border-bottom: none; margin-bottom: 0; }
+  
+  .ui-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #aaa;
+    margin-bottom: 6px;
+  }
+  
+  .ui button, .ui input[type="range"] { accent-color: #37f; width: 100%; }
+  .ui button { 
+    cursor: pointer; border: 0; padding: 8px 10px; border-radius: 8px; 
+    font-size: 12px; text-align: left; background: rgba(255,255,255,0.1);
+    color: #fff; transition: all 0.2s ease;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .ui button:hover { background: rgba(255,255,255,0.2); }
+  .ui button.active { background: #37f; }
+  .ui button.loading { opacity: 0.6; cursor: not-allowed; }
+  
+  .ui .time { font-variant-numeric: tabular-nums; font-size: 11px; color: #ccc; }
+  
+  .legend { 
+    position: absolute; right: 12px; top: 12px; z-index: 2; 
+    background: rgba(255,255,255,0.95); padding: 8px; border-radius: 8px; 
+    font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    backdrop-filter: blur(8px);
+  }
+  
+  .user-dot { 
+    width: 16px; height: 16px; border-radius: 50%; 
+    background: #1cc94a; border: 2px solid #fff; 
+    box-shadow: 0 0 0 2px rgba(28,201,74,.4); 
+    transition: all 0.3s ease;
+  }
+  .user-dot.pulse { animation: pulse 1.2s ease-in-out infinite; }
+  .user-dot.alert { background: #ff3b30; box-shadow: 0 0 0 2px rgba(255,59,48,.4); }
+  .user-dot.severe-alert { 
+    background: #ff0000; animation: severe-pulse 0.8s ease-in-out infinite;
+    box-shadow: 0 0 12px rgba(255,0,0,0.8);
+  }
+  
+  @keyframes pulse { 
+    0% { box-shadow: 0 0 0 2px rgba(28,201,74,.5); } 
+    70% { box-shadow: 0 0 0 12px rgba(28,201,74,0); } 
+    100% { box-shadow: 0 0 0 2px rgba(28,201,74,0); } 
+  }
+  
+  @keyframes severe-pulse { 
+    0% { box-shadow: 0 0 0 2px rgba(255,0,0,.8); } 
+    50% { box-shadow: 0 0 0 8px rgba(255,0,0,0); } 
+    100% { box-shadow: 0 0 0 2px rgba(255,0,0,.8); } 
+  }
+  
+  .loading-overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;
+    z-index: 1000; backdrop-filter: blur(2px);
+  }
+  
+  .loading-spinner {
+    width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.3);
+    border-top: 3px solid #37f; border-radius: 50%; animation: spin 1s linear infinite;
+  }
+  
+  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  
+  .toast {
+    position: fixed; top: 20px; right: 20px; z-index: 1001;
+    padding: 12px 16px; border-radius: 8px; color: #fff;
+    font-size: 14px; max-width: 300px; animation: slideIn 0.3s ease;
+  }
+  .toast.success { background: #1cc94a; }
+  .toast.error { background: #ff3b30; }
+  .toast.info { background: #37f; }
+  
+  @keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+  
+  .status-indicator {
+    width: 8px; height: 8px; border-radius: 50%; margin-left: 8px;
+  }
+  .status-indicator.active { background: #1cc94a; }
+  .status-indicator.loading { background: #ffa500; animation: pulse 1s infinite; }
+  .status-indicator.error { background: #ff3b30; }
+  
+  @media (max-width: 768px) {
+    .ui {
+      width: 220px;
+      font-size: 11px;
+    }
+    .ui button {
+      padding: 6px 8px;
+      font-size: 11px;
+    }
+    .legend {
+      right: 8px;
+      top: 8px;
+      font-size: 11px;
+    }
+  }
+</style>
+</head>
+<body>
+<script>const MAPBOX_TOKEN = "pk.eyJ1IjoiYm9sdHd4c29sdXRpb25zIiwiYSI6ImNtZTdjeGRicjAzZ3Myc3EwYzh2cjNjZTQifQ.NbmKGfVKof5Vu4NBlwkbow";</script>
+<div id="map"></div>
+
+<div class="ui">
+  <div class="ui-section">
+    <div class="ui-section-title">Radar Control</div>
+    <button id="play">▶︎ Play</button>
+    <input id="slider" type="range" min="0" max="0" step="1" value="0" />
+    <span id="tlabel" class="time">—</span>
+    <label>Opacity <input id="opacity" type="range" min="0" max="1" step="0.05" value="0.8" /></label>
+    <button id="toggle-radar">Hide Radar <span class="status-indicator active"></span></button>
+  </div>
+
+  <div class="ui-section">
+    <div class="ui-section-title">Alerts & Watches</div>
+    <button id="toggle-alerts">Hide Alerts <span class="status-indicator active"></span></button>
+    <button id="btn-watches">Current Watches <span class="status-indicator"></span></button>
+    <button id="btn-nationwide">Nationwide Alerts: Off</button>
+  </div>
+
+  <div class="ui-section">
+    <div class="ui-section-title">Live Weather</div>
+    <button id="btn-lightning">Lightning <span class="status-indicator"></span></button>
+    <button id="btn-tracks">Storm Tracks <span class="status-indicator"></span></button>
+    <button id="btn-reports">Storm Reports <span class="status-indicator"></span></button>
+    <button id="btn-ptwx">Precip Type <span class="status-indicator"></span></button>
+  </div>
+
+  <div class="ui-section">
+    <div class="ui-section-title">Forecasts & Outlooks</div>
+    <button id="btn-spc">SPC Outlooks <span class="status-indicator"></span></button>
+    <button id="btn-wpc">WPC QPF <span class="status-indicator"></span></button>
+    <button id="btn-cpc">CPC 6–10d <span class="status-indicator"></span></button>
+  </div>
+
+  <div class="ui-section">
+    <div class="ui-section-title">Tropical Weather</div>
+    <button id="btn-nhc-cone">NHC Cone/Track <span class="status-indicator"></span></button>
+    <button id="btn-nhc-outlook">NHC Outlook <span class="status-indicator"></span></button>
+  </div>
+
+  <div class="ui-section">
+    <div class="ui-section-title">Location Tools</div>
+    <button id="btn-mark">Mark Location</button>
+    <button id="btn-gps">Use My Location</button>
+  </div>
+</div>
+
+<div class="legend" id="radar-legend">
+  <strong>Weather Radar Legend</strong><br>
+  <img alt="Radar legend" src="https://nowcoast.noaa.gov/geoserver/observations/weather_radar/wms?service=WMS&request=GetLegendGraphic&format=image/png&layer=conus_base_reflectivity_mosaic"/>
+</div>
+
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+<script>
+// ===== Utilities =====
+function showLoading(text = 'Loading...') {
+  let overlay = document.getElementById('loading-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'loading-overlay';
+    overlay.className = 'loading-overlay';
+    overlay.innerHTML = `<div><div class="loading-spinner"></div><div style="margin-top:12px;color:#fff;">${text}</div></div>`;
+    document.body.appendChild(overlay);
+  }
+}
+
+function hideLoading() {
+  const overlay = document.getElementById('loading-overlay');
+  if (overlay) overlay.remove();
+}
+
+function showToast(message, type = 'info') {
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
+
+function updateButtonStatus(buttonId, status, text) {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  
+  const indicator = btn.querySelector('.status-indicator');
+  if (indicator) {
+    indicator.className = `status-indicator ${status}`;
+  }
+  
+  if (text) {
+    const textNode = btn.childNodes[0];
+    if (textNode && textNode.nodeType === 3) {
+      textNode.textContent = text + ' ';
+    }
+  }
+  
+  btn.classList.toggle('active', status === 'active');
+  btn.classList.toggle('loading', status === 'loading');
+}
+
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
+
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response;
+    } catch (error) {
+      if (i === maxRetries) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+}
+
+// ===== Map init =====
+mapboxgl.accessToken = MAPBOX_TOKEN;
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/dark-v11',
+  center: [-86.1581, 39.7684], // Indianapolis
+  zoom: 6
+});
+map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
+map.addControl(new mapboxgl.FullscreenControl());
+
+// ===== Helpers =====
+function wmsUrl(base, layer, extraParams={}) {
+  const p=new URLSearchParams({
+    service:'WMS', request:'GetMap', version:'1.3.0',
+    layers:layer, format:'image/png', transparent:'true',
+    crs:'EPSG:3857', width:256, height:256, ...extraParams
+  });
+  return `${base}?${p.toString()}&bbox={bbox-epsg-3857}`;
+}
+
+function addRaster(id, url, opacity=0.8) {
+  if(map.getSource(id)) return;
+  map.addSource(id,{ type:'raster', tiles:[url], tileSize:256 });
+  map.addLayer({ id, type:'raster', source:id, paint:{ 'raster-opacity':opacity, 'raster-fade-duration': 0 } });
+}
+
+function toggleLayer(id, visible){ 
+  if(map.getLayer(id)) map.setLayoutProperty(id,'visibility', visible?'visible':'none'); 
+}
+
+async function identifyArcGIS(base, layerIds, lngLat){
+  const geometry=JSON.stringify({ x:lngLat.lng, y:lngLat.lat, spatialReference:{wkid:4326} });
+  const q=new URLSearchParams({
+    f:'json', geometry, geometryType:'esriGeometryPoint', sr:'4326',
+    tolerance:3,
+    mapExtent:`${map.getBounds().getWest()},${map.getBounds().getSouth()},${map.getBounds().getEast()},${map.getBounds().getNorth()}`,
+    imageDisplay:'800,600,96',
+    layers:`all:${layerIds}`, returnGeometry:'false'
+  });
+  return (await fetchWithRetry(`${base}/identify?${q.toString()}`)).json();
+}
+
+function showPopup(lngLat, html){ 
+  new mapboxgl.Popup({maxWidth: '400px'}).setLngLat(lngLat).setHTML(html).addTo(map); 
+}
+
+// Field mappers
+function getSPCRisk(a){ return a.LABEL || a.RISK || a.RISK_CAT || a.CAT || a.CATEGORY || a.DN || a.GEN || a.Risk || 'Unknown'; }
+function getWPCAmount(a){ return a.AMOUNT || a.QPF || a.LABEL || a.Label || a.Contour || a.VALUE || '—'; }
+function getCPCPieces(results){ const out=[]; for(const r of (results||[])){ const a=r.attributes||{}; const t=a.LABEL||a.Text||a.Category||a.CAT||a.VALUE; if(t) out.push(t); } return out; }
+
+// ===== Enhanced Radar with better frame management =====
+function buildRadarFrames(){
+  const frames=[];
+  const now=new Date();
+  now.setUTCMinutes(Math.floor(now.getUTCMinutes()/10)*10,0,0);
+  for(let m=30;m>=0;m-=10){
+    const t=new Date(now.getTime()-m*60000);
+    frames.push({
+      ts:t.toISOString(),
+      url:wmsUrl('https://nowcoast.noaa.gov/geoserver/observations/weather_radar/wms','conus_base_reflectivity_mosaic',{ time:t.toISOString() })
+    });
+  }
+  return frames;
+}
+
+let RADAR_FRAMES = buildRadarFrames();
+const radarLayerIds=[]; 
+let currentRadarIdx=0; 
+let radarRefreshTimer=null;
+
+async function updateRadarFrames(){
+  try {
+    const newFrames = buildRadarFrames();
+    for(let i=0;i<newFrames.length;i++){
+      const id=`radar-${i}`, url=newFrames[i].url, src=map.getSource(id);
+      if(src){
+        try{ if(map.getLayer(id)) map.removeLayer(id); }catch(e){}
+        try{ map.removeSource(id); }catch(e){}
+        map.addSource(id,{ type:'raster', tiles:[url], tileSize:256 });
+        map.addLayer({ id, type:'raster', source:id, paint:{ 'raster-opacity': (i===currentRadarIdx)? parseFloat(document.getElementById('opacity').value) : 0, 'raster-fade-duration':0 } });
+      }
+    }
+    RADAR_FRAMES = newFrames;
+    const slider=document.getElementById('slider');
+    slider.max = RADAR_FRAMES.length-1;
+    if(currentRadarIdx > RADAR_FRAMES.length-1) currentRadarIdx = RADAR_FRAMES.length-1;
+    document.getElementById('tlabel').textContent = new Date(RADAR_FRAMES[currentRadarIdx].ts).toLocaleString();
+  } catch (error) {
+    console.error('Radar update failed:', error);
+    showToast('Failed to update radar data', 'error');
+  }
+}
+
+map.on('load',()=>{
+  showLoading('Initializing weather radar...');
+  
+  // Radar frames
+  RADAR_FRAMES.forEach((f,i)=>{ 
+    const id=`radar-${i}`; 
+    addRaster(id,f.url, i===RADAR_FRAMES.length-1 ? 0.8 : 0); 
+    radarLayerIds.push(id); 
+  });
+  
+  const slider=document.getElementById('slider');
+  slider.max = RADAR_FRAMES.length-1;
+  currentRadarIdx = RADAR_FRAMES.length-1;
+  setActiveFrame(currentRadarIdx);
+
+  // Enhanced Alerts with better styling
+  map.addSource('nws-alerts',{ type:'geojson', data:{ type:'FeatureCollection', features:[] } });
+  map.addLayer({ id:'alerts-fill', type:'fill', source:'nws-alerts', paint:{
+    'fill-color': [
+      'match', ['get','event'],
+      'Tornado Warning', '#ff0000',
+      'Severe Thunderstorm Warning', '#ffd400',
+      'Flash Flood Warning', '#90ee90',
+      'Flood Warning', '#006400',
+      'Winter Storm Warning', '#ff69b4',
+      'Blizzard Warning', '#4169e1',
+      'Ice Storm Warning', '#9370db',
+      /* default */ '#7e7e7e'
+    ],
+    'fill-opacity': 0.35
+  }});
+  
+  map.addLayer({ id:'alerts-outline', type:'line', source:'nws-alerts', paint:{
+    'line-color': [
+      'match', ['get','event'],
+      'Tornado Warning', '#cc0000',
+      'Severe Thunderstorm Warning', '#b38f00',
+      'Flash Flood Warning', '#5fbf5f',
+      'Flood Warning', '#004d00',
+      'Winter Storm Warning', '#cc1493',
+      'Blizzard Warning', '#191970',
+      'Ice Storm Warning', '#663399',
+      /* default */ '#ffffff'
+    ],
+    'line-width': 2
+  }});
+  
+  map.addLayer({ id:'alerts-label', type:'symbol', source:'nws-alerts',
+    layout:{ 
+      'text-field':['coalesce',['get','event'],['get','headline'],'NWS Alert'], 
+      'text-size':11, 
+      'text-variable-anchor':['top','bottom','left','right'], 
+      'text-radial-offset':0.8,
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold']
+    },
+    paint:{ 'text-color':'#fff','text-halo-color':'#000','text-halo-width':1.5 }
+  });
+  
+  map.on('click','alerts-fill',(e)=>{
+    const f=e.features&&e.features[0]; if(!f) return;
+    const p=f.properties||{};
+    const html=`<div style="max-width:350px;">
+      <strong style="color:#ff3b30;">${p.event||'NWS Alert'}</strong>
+      ${p.headline?`<div style="margin:8px 0;font-weight:600;">${p.headline}</div>`:''}
+      ${p.description?`<div style="margin:8px 0;line-height:1.4;">${p.description}</div>`:''}
+      ${p.instruction?`<div style="margin:8px 0;font-style:italic;background:rgba(255,59,48,0.1);padding:8px;border-radius:4px;">${p.instruction}</div>`:''}
+      <div style="margin-top:8px;font-size:11px;color:#666;">
+        ${p.severity?`Severity: ${p.severity} | `:''}
+        ${p.urgency?`Urgency: ${p.urgency} | `:''}
+        ${p.certainty?`Certainty: ${p.certainty}`:''}
+      </div>
+      ${p.expires?`<div style="margin-top:4px;font-size:11px;color:#666;">Expires: ${new Date(p.expires).toLocaleString()}</div>`:''}
+    </div>`;
+    showPopup(e.lngLat, html);
+  });
+
+  // Enhanced Watches
+  map.addSource('watches',{ type:'geojson', data:{ type:'FeatureCollection', features:[] } });
+  map.addLayer({ id:'watches-fill', type:'fill', source:'watches', paint:{ 
+    'fill-color':[ 
+      'match', ['get','phenomena'], 
+      'TO', '#ff3b30', 
+      'SV', '#ff9500', 
+      'FF', '#2dd36f', 
+      'WS', '#5ac8fa', 
+      /*default*/ '#b28dff' 
+    ], 
+    'fill-opacity':0.25 
+  }});
+  
+  map.addLayer({ id:'watches-line', type:'line', source:'watches', paint:{ 
+    'line-color':[ 
+      'match', ['get','phenomena'], 
+      'TO', '#ff3b30', 
+      'SV', '#ff9500', 
+      'FF', '#2dd36f', 
+      'WS', '#5ac8fa', 
+      '#b28dff' 
+    ], 
+    'line-width':3, 
+    'line-dasharray':[3,2] 
+  }});
+  
+  map.addLayer({ id:'watches-label', type:'symbol', source:'watches', 
+    layout:{ 
+      'text-field':['coalesce',['get','event'],['get','watch_type'],['get','phenomena'],'Watch'], 
+      'text-size':12, 
+      'text-variable-anchor':['top','bottom','left','right'], 
+      'text-radial-offset':0.8,
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold']
+    }, 
+    paint:{ 'text-color':'#fff','text-halo-color':'#000','text-halo-width':1.5 } 
+  });
+
+  // SBW + Enhanced Tracks
+  map.addSource('sbw',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({id:'sbw-fill',type:'fill',source:'sbw',paint:{'fill-color':'#f6a821','fill-opacity':0.15},layout:{'visibility':'none'}});
+  map.addLayer({id:'sbw-line',type:'line',source:'sbw',paint:{'fill-color':'#f6a821','line-width':1},layout:{'visibility':'none'}});
+  
+  map.addSource('sbw-tracks',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({id:'sbw-tracks-line',type:'line',source:'sbw-tracks',paint:{'line-color':'#00d4ff','line-width':3,'line-dasharray':[2,1]}});
+
+  // Enhanced LSR
+  map.addSource('lsr',{type:'geojson',data:{type:'FeatureCollection',features:[]}}); 
+  map.addLayer({id:'lsr-dot',type:'circle',source:'lsr',paint:{
+    'circle-radius':5,
+    'circle-color':[
+      'match', ['get','type'],
+      'T', '#ff0000',  // Tornado
+      'H', '#00ff00',  // Hail
+      'W', '#0000ff',  // Wind
+      'F', '#ffff00',  // Flood
+      /* default */ '#ff4d4f'
+    ],
+    'circle-stroke-color':'#fff',
+    'circle-stroke-width':2
+  }});
+  
+  map.addLayer({id:'lsr-label',type:'symbol',source:'lsr',
+    layout:{
+      'text-field':['get','typetext'],
+      'text-size':10,
+      'text-offset':[0,1.5],
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold']
+    },
+    paint:{'text-halo-color':'#000','text-halo-width':1.5,'text-color':'#fff'}
+  });
+
+  // Initial data load
+  refreshAlerts();
+  refreshWatches();
+  
+  hideLoading();
+  showToast('Weather radar initialized successfully', 'success');
+
+  // Keep MRMS frames fresh
+  radarRefreshTimer = setInterval(updateRadarFrames, 60000);
+});
+
+// Enhanced slider + autoplay
+function setActiveFrame(i){
+  i=Math.max(0,Math.min(RADAR_FRAMES.length-1,i));
+  const op=parseFloat(document.getElementById('opacity').value);
+  radarLayerIds.forEach((id,idx)=>map.setPaintProperty(id,'raster-opacity', idx===i ? op : 0));
+  currentRadarIdx=i;
+  document.getElementById('slider').value=String(i);
+  document.getElementById('tlabel').textContent=new Date(RADAR_FRAMES[i].ts).toLocaleString();
+}
+
+(function(){
+  const slider=document.getElementById('slider');
+  const playBtn=document.getElementById('play');
+  const opacityCtl=document.getElementById('opacity');
+  let playing=false, timer=null;
+  
+  slider.oninput=()=>setActiveFrame(parseInt(slider.value,10));
+  opacityCtl.oninput=()=>setActiveFrame(currentRadarIdx);
+  
+  function tick(){ setActiveFrame((currentRadarIdx+1)%RADAR_FRAMES.length); }
+  function setPlaying(on){ 
+    playing=on; 
+    playBtn.textContent=on?'⏸ Pause':'▶︎ Play'; 
+    clearInterval(timer); 
+    if(on) timer=setInterval(tick,400); 
+  }
+  
+  playBtn.onclick=()=>setPlaying(!playing);
+  
+  document.getElementById('toggle-radar').onclick=()=>{
+    const visible=(map.getLayoutProperty(radarLayerIds[0],'visibility')||'visible')!=='none';
+    radarLayerIds.forEach(id=>toggleLayer(id,!visible));
+    updateButtonStatus('toggle-radar', !visible ? 'active' : '', !visible ? 'Hide Radar' : 'Show Radar');
+    if(!visible){ setActiveFrame(currentRadarIdx); }
+  };
+})();
+
+// ===== Enhanced Watches =====
+async function refreshWatches(){
+  updateButtonStatus('btn-watches', 'loading');
+  try{
+    const gj = await (await fetchWithRetry('https://mesonet.agron.iastate.edu/geojson/watch.geojson?_='+Date.now())).json();
+    map.getSource('watches').setData(gj);
+    updateButtonStatus('btn-watches', 'active', `Current Watches (${gj.features?.length || 0})`);
+    showToast(`Loaded ${gj.features?.length || 0} current watches`, 'success');
+  }catch(e){ 
+    console.error('Watches fetch failed', e); 
+    updateButtonStatus('btn-watches', 'error');
+    showToast('Failed to load watch data', 'error');
+  }
+}
+
+document.getElementById('btn-watches').onclick=()=>{
+  const vis=(map.getLayoutProperty('watches-fill','visibility')||'visible')!=='none';
+  ['watches-fill','watches-line','watches-label'].forEach(id=>toggleLayer(id,!vis));
+  updateButtonStatus('btn-watches', !vis ? 'active' : '');
+  if(!vis) refreshWatches();
+};
+
+// ===== Enhanced Alerts =====
+let nationwideAlerts=false; 
+let alertCache = new Map();
+
+const btnNationwide=document.getElementById('btn-nationwide');
+btnNationwide.onclick=()=>{ 
+  nationwideAlerts=!nationwideAlerts; 
+  btnNationwide.textContent=`Nationwide Alerts: ${nationwideAlerts?'On':'Off'}`; 
+  refreshAlerts(true); 
+};
+
+const debouncedRefreshAlerts = debounce(refreshAlerts, 1000);
+
+async function refreshAlerts(force = false){
+  updateButtonStatus('toggle-alerts', 'loading');
+  try{
+    const b=map.getBounds();
+    const cacheKey = nationwideAlerts ? 'nationwide' : `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+    const cacheTime = Date.now() - (nationwideAlerts ? 300000 : 60000); // 5min
